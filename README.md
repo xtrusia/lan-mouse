@@ -55,6 +55,19 @@ Most current desktop environments and operating systems are fully supported, thi
 
 For more detailed information about os support see [Detailed OS Support](#detailed-os-support)
 
+### Windows HID input (FakerInput)
+
+This fork includes an optional `windows-fakerinput` backend that sends mouse and keyboard input through HID for applications that reject Win32-injected input.
+Build this fork and separately install the signed [FakerInput 0.1.1 x64 driver](https://github.com/Ryochan7/FakerInput/releases/tag/v0.1.1), then add this top-level setting to the receiving Windows PC's configuration:
+
+```toml
+emulation_backend = "windows-fakerinput"
+```
+
+The configuration is `%LOCALAPPDATA%\lan-mouse\config.toml`, or `C:\ProgramData\lan-mouse\config.toml` when using this fork's Windows service. Restart Lan Mouse after changing it. The driver is required and is not bundled with Lan Mouse.
+
+Mouse movement, buttons, scrolling, modifiers and media keys use HID. Up to six ordinary keys can be held at once; F13–F24 and dedicated Hangul/Hanja keys retain the normal Windows input path. Omit the setting or select `windows` to restore the default backend. See [HID behavior and cleanup](DOC.md#windows-hid-input) for details.
+
 ### Android & IOS
 
 A proof of concept for an Android / IOS Application by [rohitsangwan01](https://github.com/rohitsangwan01) can be found [here](https://github.com/rohitsangwan01/lan-mouse-mobile).
@@ -457,6 +470,7 @@ The following sections detail the emulation and capture backends provided by lan
 - `xdp`: This backend uses the [freedesktop remote-desktop-portal](https://flatpak.github.io/xdg-desktop-portal/#gdbus-org.freedesktop.portal.RemoteDesktop) and is supported on GNOME and Plasma.
 - `x11`: Backend for X11 sessions.
 - `windows`: Backend for Windows.
+- `windows-fakerinput`: Optional Windows HID mouse and keyboard backend; requires the [FakerInput driver and configuration](#windows-hid-input-fakerinput).
 - `macos`: Backend for MacOS.
 
 
