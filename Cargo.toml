@@ -105,3 +105,7 @@ icon = ["target/icon.icns"]
 identifier = "de.feschber.LanMouse"
 osx_info_plist_exts = ["build-aux/macos-lsui-element.plist"]
 resources = ["target/menubar-template.png"]
+
+[[example]]
+name = "desktop-probe"
+path = "tools/windows-service/desktop_probe.rs"

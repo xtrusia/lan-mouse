@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use std::ops::BitOrAssign;
 use std::time::Duration;
 use tokio::task::AbortHandle;
+use windows::Win32::Foundation::GENERIC_WRITE;
 use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEWINDOW,
-    DESKTOP_WRITEOBJECTS, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop,
+    CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetThreadDesktop, OpenInputDesktop,
+    SetThreadDesktop,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -116,7 +117,7 @@ fn send_input_safe(input: INPUT) {
         let input_desktop = OpenInputDesktop(
             DESKTOP_CONTROL_FLAGS(0),
             false,
-            DESKTOP_ACCESS_FLAGS(DESKTOP_CREATEWINDOW.0 | DESKTOP_WRITEOBJECTS.0),
+            DESKTOP_ACCESS_FLAGS(GENERIC_WRITE.0),
         );
         if let (Ok(old), Ok(desktop)) = (&old_desktop, &input_desktop) {
             if let Err(e) = SetThreadDesktop(*desktop) {
