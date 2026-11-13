@@ -59,6 +59,7 @@ bitflags = "2.6.0"
 windows = { version = "0.61.2", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_System_StationsAndDesktops",
     "Win32_Foundation",
     "Win32_Graphics",
     "Win32_Graphics_Gdi",
@@ -75,3 +76,6 @@ layer_shell = [
 ]
 x11 = ["dep:x11"]
 libei = ["dep:reis", "dep:ashpd"]
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.61.2", features = ["Win32_Security"] }

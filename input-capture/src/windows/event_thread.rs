@@ -8,22 +8,29 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::error::TrySendError;
-use windows::Win32::Foundation::{FALSE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     DEVMODEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, ENUM_CURRENT_SETTINGS,
     EnumDisplayDevicesW, EnumDisplaySettingsW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetThreadDesktop,
+    GetUserObjectInformationW, HDESK, OpenInputDesktop, SetThreadDesktop, UOI_NAME,
+};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::core::{PCWSTR, w};
 
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DispatchMessageW, EDD_GET_DEVICE_INTERFACE_NAME, GetMessageW,
-    HOOKPROC, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG, MSLLHOOKSTRUCT, PostThreadMessageW,
-    RegisterClassW, SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
+    CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
+    EDD_GET_DEVICE_INTERFACE_NAME, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, KillTimer, LLKHF_EXTENDED,
+    MSG, MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassW, SetTimer, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
     WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
     WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WNDPROC,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW,
 };
 
 use input_event::{
@@ -169,62 +176,16 @@ fn start_routine(
         cnd.notify_one();
     }
 
-    let mouse_proc: HOOKPROC = Some(mouse_proc);
-    let kybrd_proc: HOOKPROC = Some(kybrd_proc);
-    let window_proc: WNDPROC = Some(window_proc);
-
-    /* register hooks */
-    unsafe {
-        let _ = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, None, 0).unwrap();
-        let _ = SetWindowsHookExW(WH_KEYBOARD_LL, kybrd_proc, None, 0).unwrap();
-    }
-
-    let instance = unsafe { GetModuleHandleW(None).unwrap() };
-    let instance = instance.into();
-    let window_class: WNDCLASSW = WNDCLASSW {
-        lpfnWndProc: window_proc,
-        hInstance: instance,
-        lpszClassName: w!("lan-mouse-message-window-class"),
-        ..Default::default()
-    };
-
-    static WINDOW_CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
-    if WINDOW_CLASS_REGISTERED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        /* register window class if not yet done so */
-        unsafe {
-            let ret = RegisterClassW(&window_class);
-            if ret == 0 {
-                panic!("RegisterClassW");
-            }
-        }
-    }
-
-    /* window is used ro receive WM_DISPLAYCHANGE messages */
-    unsafe {
-        CreateWindowExW(
-            Default::default(),
-            w!("lan-mouse-message-window-class"),
-            w!("lan-mouse-msg-window"),
-            WINDOW_STYLE::default(),
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(instance),
-            None,
-        )
-        .expect("CreateWindowExW");
-    }
+    let mut desktop = CaptureDesktop::new().expect("capture desktop");
+    let timer = unsafe { SetTimer(None, 0, 200, None) };
+    assert_ne!(timer, 0, "desktop monitor timer");
 
     /* run message loop */
     while let Some(msg) = get_msg() {
         // mouse / keybrd proc do not actually return a message
-        if msg.hwnd.0.is_null() {
+        if msg.message == WM_TIMER && msg.wParam.0 == timer {
+            desktop.follow_input_desktop();
+        } else if msg.hwnd.0.is_null() && msg.message == WM_USER {
             /* messages sent via PostThreadMessage */
             match msg.wParam.0 {
                 x if x == RequestType::Exit as usize => break,
@@ -252,6 +213,199 @@ fn start_routine(
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+        }
+    }
+    unsafe {
+        let _ = KillTimer(None, timer);
+    }
+}
+
+fn register_window_class() -> HINSTANCE {
+    let instance = unsafe { GetModuleHandleW(None).unwrap() };
+    let instance = instance.into();
+    let window_class: WNDCLASSW = WNDCLASSW {
+        lpfnWndProc: Some(window_proc),
+        hInstance: instance,
+        lpszClassName: w!("lan-mouse-message-window-class"),
+        ..Default::default()
+    };
+
+    static WINDOW_CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
+    if WINDOW_CLASS_REGISTERED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        /* register window class if not yet done so */
+        unsafe {
+            let ret = RegisterClassW(&window_class);
+            if ret == 0 {
+                panic!("RegisterClassW");
+            }
+        }
+    }
+
+    instance
+}
+
+#[derive(Default)]
+struct DesktopHooks {
+    mouse: HHOOK,
+    keyboard: HHOOK,
+    window: HWND,
+}
+
+impl DesktopHooks {
+    fn new(instance: HINSTANCE) -> windows::core::Result<Self> {
+        let mut hooks = Self::default();
+        unsafe {
+            hooks.mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0)?;
+            hooks.keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kybrd_proc), None, 0)?;
+            hooks.window = CreateWindowExW(
+                Default::default(),
+                w!("lan-mouse-message-window-class"),
+                w!("lan-mouse-msg-window"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(instance),
+                None,
+            )?;
+        }
+        Ok(hooks)
+    }
+}
+
+impl Drop for DesktopHooks {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.mouse.is_invalid() {
+                let _ = UnhookWindowsHookEx(self.mouse);
+            }
+            if !self.keyboard.is_invalid() {
+                let _ = UnhookWindowsHookEx(self.keyboard);
+            }
+            if !self.window.is_invalid() {
+                let _ = DestroyWindow(self.window);
+            }
+        }
+    }
+}
+
+fn desktop_name(desktop: HDESK) -> windows::core::Result<String> {
+    let mut name = [0u16; 256];
+    unsafe {
+        GetUserObjectInformationW(
+            HANDLE(desktop.0),
+            UOI_NAME,
+            Some(name.as_mut_ptr().cast()),
+            std::mem::size_of_val(&name) as u32,
+            None,
+        )?;
+    }
+    let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+    Ok(String::from_utf16_lossy(&name[..end]))
+}
+
+struct CaptureDesktop {
+    instance: HINSTANCE,
+    original: HDESK,
+    owned: Option<HDESK>,
+    hooks: Option<DesktopHooks>,
+    name: String,
+}
+
+impl CaptureDesktop {
+    fn new() -> windows::core::Result<Self> {
+        let instance = register_window_class();
+        let original = unsafe { GetThreadDesktop(GetCurrentThreadId())? };
+        Ok(Self {
+            instance,
+            original,
+            owned: None,
+            hooks: Some(DesktopHooks::new(instance)?),
+            name: desktop_name(original)?,
+        })
+    }
+
+    // Takes ownership of the newly opened desktop, even on failure.
+    fn attach(&mut self, desktop: HDESK) -> windows::core::Result<()> {
+        let name = match desktop_name(desktop) {
+            Ok(name) => name,
+            Err(e) => {
+                unsafe {
+                    let _ = CloseDesktop(desktop);
+                }
+                return Err(e);
+            }
+        };
+        if name == self.name {
+            unsafe {
+                let _ = CloseDesktop(desktop);
+            }
+            return Ok(());
+        }
+        let old = self.owned.unwrap_or(self.original);
+        // Windows rejects SetThreadDesktop while this thread owns hooks/windows.
+        drop(self.hooks.take());
+        let result =
+            unsafe { SetThreadDesktop(desktop) }.and_then(|()| DesktopHooks::new(self.instance));
+        match result {
+            Ok(hooks) => {
+                self.hooks = Some(hooks);
+                if let Some(old) = self.owned.replace(desktop) {
+                    unsafe {
+                        let _ = CloseDesktop(old);
+                    }
+                }
+                ACTIVE_CLIENT.take();
+                PREV_POS.take();
+                DISPLAY_RESOLUTION_GENERATION.fetch_add(1, Ordering::Release);
+                log::info!("capture desktop switched: {} -> {name}", self.name);
+                self.name = name;
+                Ok(())
+            }
+            Err(e) => {
+                unsafe {
+                    SetThreadDesktop(old).expect("restore capture desktop");
+                }
+                self.hooks = Some(DesktopHooks::new(self.instance).expect("restore capture hooks"));
+                unsafe {
+                    let _ = CloseDesktop(desktop);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn follow_input_desktop(&mut self) {
+        let desktop = unsafe {
+            OpenInputDesktop(
+                DESKTOP_CONTROL_FLAGS(0),
+                false,
+                DESKTOP_ACCESS_FLAGS(GENERIC_READ.0 | GENERIC_WRITE.0),
+            )
+        };
+        // Normal user daemons cannot open the secure desktop; retain their hooks.
+        if let Ok(desktop) = desktop {
+            if let Err(e) = self.attach(desktop) {
+                log::warn!("cannot follow input desktop: {e}");
+            }
+        }
+    }
+}
+
+impl Drop for CaptureDesktop {
+    fn drop(&mut self) {
+        drop(self.hooks.take());
+        if let Some(desktop) = self.owned.take() {
+            unsafe {
+                let _ = SetThreadDesktop(self.original);
+                let _ = CloseDesktop(desktop);
             }
         }
     }
@@ -545,5 +699,66 @@ fn to_mouse_event(wparam: WPARAM, lparam: LPARAM) -> Option<PointerEvent> {
             log::warn!("unknown mouse event: {w:?}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::*;
+    use windows::Win32::System::StationsAndDesktops::{CreateDesktopW, OpenDesktopW};
+    use windows::core::HSTRING;
+
+    #[test]
+    fn capture_hooks_follow_desktop_and_restore() {
+        std::thread::spawn(|| {
+            let mut capture = CaptureDesktop::new().unwrap();
+            let original = capture.name.clone();
+            let name = format!("lan-mouse-test-{}", unsafe { GetCurrentThreadId() });
+            let desktop = unsafe {
+                CreateDesktopW(
+                    &HSTRING::from(&name),
+                    PCWSTR::null(),
+                    None,
+                    DESKTOP_CONTROL_FLAGS(0),
+                    GENERIC_READ.0 | GENERIC_WRITE.0,
+                    None,
+                )
+                .unwrap()
+            };
+            // Never switch the visible desktop or inject input.
+            capture.attach(desktop).unwrap();
+            assert_eq!(capture.name, name);
+            assert!(capture.attach(HDESK::default()).is_err());
+            assert_eq!(capture.name, name);
+            assert!(capture.hooks.is_some());
+            CLIENTS.with_borrow_mut(|clients| {
+                clients.insert(Position::Right);
+            });
+            ACTIVE_CLIENT.set(Some(Position::Right));
+            PREV_POS.set(Some((1, 2)));
+            let original_handle = unsafe {
+                OpenDesktopW(
+                    &HSTRING::from(&original),
+                    DESKTOP_CONTROL_FLAGS(0),
+                    false,
+                    GENERIC_READ.0 | GENERIC_WRITE.0,
+                )
+                .unwrap()
+            };
+            capture.attach(original_handle).unwrap();
+            assert_eq!(capture.name, original);
+            assert_eq!(ACTIVE_CLIENT.get(), None);
+            assert_eq!(PREV_POS.get(), None);
+            CLIENTS.with_borrow_mut(|clients| {
+                assert!(clients.remove(&Position::Right));
+            });
+            drop(capture);
+            assert_eq!(
+                desktop_name(unsafe { GetThreadDesktop(GetCurrentThreadId()).unwrap() }).unwrap(),
+                original
+            );
+        })
+        .join()
+        .unwrap();
     }
 }
