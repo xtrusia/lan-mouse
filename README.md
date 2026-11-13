@@ -477,3 +477,7 @@ The following sections detail the emulation and capture backends provided by lan
 - `windows`: Backend for input capture on Windows.
 - `macos`: Backend for input capture on MacOS.
 - `x11`: TODO (not yet supported)
+
+### Local Windows secure desktop support
+
+This checkout contains an experimental Windows service backport for UAC input. See [installation, rollback and verification limits](tools/windows-service/README.md). The normal user daemon does not acquire secure desktop access.

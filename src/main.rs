@@ -43,6 +43,41 @@ enum LanMouseError {
 fn main() {
     // init logging
     let env = Env::default().filter_or("LAN_MOUSE_LOG_LEVEL", "info");
+    #[cfg(windows)]
+    let env = {
+        let service_process = std::env::args().any(|a| a == "win-svc" || a == "service-daemon");
+        if service_process {
+            let name = if std::env::args().nth(1).as_deref() == Some("win-svc") {
+                "winsvc.log"
+            } else {
+                "daemon.log"
+            };
+            let path = std::path::Path::new(r"C:\ProgramData\lan-mouse").join(name);
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .expect("protected service log directory must exist");
+            env_logger::Builder::from_env(env)
+                .target(env_logger::Target::Pipe(Box::new(file)))
+                .init();
+            if std::env::args().nth(1).as_deref() == Some("win-svc") {
+                if let Err(e) = lan_mouse::windows_service::run_dispatch() {
+                    log::error!("{e}");
+                    process::exit(1);
+                }
+                return;
+            }
+            None
+        } else {
+            Some(env)
+        }
+    };
+    #[cfg(windows)]
+    if let Some(env) = env {
+        env_logger::init_from_env(env);
+    }
+    #[cfg(not(windows))]
     env_logger::init_from_env(env);
 
     if let Err(e) = run() {
@@ -58,6 +93,8 @@ fn run() -> Result<(), LanMouseError> {
             Command::TestEmulation(args) => run_async(emulation_test::run(config, args))?,
             Command::TestCapture(args) => run_async(capture_test::run(config, args))?,
             Command::Cli(cli_args) => run_async(lan_mouse_cli::run(cli_args))?,
+            #[cfg(windows)]
+            Command::ServiceDaemon => run_async(run_service(config))?,
             Command::Daemon => {
                 // if daemon is specified we run the service
                 match run_async(run_service(config)) {

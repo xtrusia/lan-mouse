@@ -114,6 +114,10 @@ pub enum Command {
     Cli(CliArgs),
     /// run in daemon mode
     Daemon,
+    /// Internal daemon managed by the Windows service; no frontend IPC.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    ServiceDaemon,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]

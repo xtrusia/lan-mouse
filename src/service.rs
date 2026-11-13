@@ -48,7 +48,7 @@ pub struct Service {
     /// dns resolver
     resolver: DnsResolver,
     /// frontend listener
-    frontend_listener: AsyncFrontendListener,
+    frontend_listener: Option<AsyncFrontendListener>,
     /// authorized public key sha256 fingerprints
     authorized_keys: Arc<RwLock<HashMap<String, String>>>,
     /// (outgoing) client information
@@ -91,7 +91,15 @@ impl Service {
         let public_key_fingerprint = crypto::certificate_fingerprint(&cert);
 
         // create frontend communication adapter, exit if already running
-        let frontend_listener = AsyncFrontendListener::new().await?;
+        #[cfg(not(windows))]
+        let enable_frontend = true;
+        #[cfg(windows)]
+        let enable_frontend = config.command() != Some(crate::config::Command::ServiceDaemon);
+        let frontend_listener = if enable_frontend {
+            Some(AsyncFrontendListener::new().await?)
+        } else {
+            None
+        };
 
         let authorized_keys = Arc::new(RwLock::new(config.authorized_fingerprints()));
         // listener + connection
@@ -145,7 +153,12 @@ impl Service {
 
         loop {
             tokio::select! {
-                request = self.frontend_listener.next() => self.handle_frontend_request(request),
+                request = async {
+                    match self.frontend_listener.as_mut() {
+                        Some(listener) => listener.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => self.handle_frontend_request(request),
                 _ = self.frontend_event_pending.notified() => self.handle_frontend_pending().await,
                 event = self.emulation.event() => self.handle_emulation_event(event),
                 event = self.capture.event() => self.handle_capture_event(event),
@@ -268,7 +281,9 @@ impl Service {
 
     async fn handle_frontend_pending(&mut self) {
         while let Some(event) = self.pending_frontend_events.pop_front() {
-            self.frontend_listener.broadcast(event).await;
+            if let Some(listener) = self.frontend_listener.as_mut() {
+                listener.broadcast(event).await;
+            }
         }
     }
 

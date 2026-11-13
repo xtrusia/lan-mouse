@@ -8,6 +8,11 @@ use async_trait::async_trait;
 use std::ops::BitOrAssign;
 use std::time::Duration;
 use tokio::task::AbortHandle;
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEWINDOW,
+    DESKTOP_WRITEOBJECTS, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop,
+};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
     MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
@@ -105,12 +110,34 @@ impl WindowsEmulation {
 
 fn send_input_safe(input: INPUT) {
     unsafe {
-        loop {
-            /* retval = number of successfully submitted events */
-            if SendInput(&[input], std::mem::size_of::<INPUT>() as i32) > 0 {
-                break;
+        // The service runs in the console session as SYSTEM. Only this input
+        // thread moves to the secure desktop; it owns no windows or hooks.
+        let old_desktop = GetThreadDesktop(GetCurrentThreadId());
+        let input_desktop = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(DESKTOP_CREATEWINDOW.0 | DESKTOP_WRITEOBJECTS.0),
+        );
+        if let (Ok(old), Ok(desktop)) = (&old_desktop, &input_desktop) {
+            if let Err(e) = SetThreadDesktop(*desktop) {
+                log::debug!("cannot attach input desktop: {e}");
+            } else {
+                let count = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+                if count == 0 {
+                    log::debug!("SendInput rejected event during desktop transition");
+                }
+                if let Err(e) = SetThreadDesktop(*old) {
+                    log::error!("cannot restore input desktop: {e}");
+                }
+                let _ = CloseDesktop(*desktop);
+                return;
             }
         }
+        if let Ok(desktop) = input_desktop {
+            let _ = CloseDesktop(desktop);
+        }
+        // A desktop transition must never spin and block the network event loop.
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
     }
 }
 
