@@ -4,7 +4,7 @@ use std::{
     fmt::Display,
 };
 
-use input_event::{Event, KeyboardEvent};
+use input_event::{Event, KeyboardEvent, PointerEvent};
 
 pub use self::error::{EmulationCreationError, EmulationError, InputEmulationError};
 
@@ -44,6 +44,8 @@ pub enum Backend {
     X11,
     #[cfg(windows)]
     Windows,
+    #[cfg(windows)]
+    WindowsFakerInput,
     #[cfg(target_os = "macos")]
     MacOs,
     Dummy,
@@ -62,6 +64,8 @@ impl Display for Backend {
             Backend::X11 => write!(f, "X11"),
             #[cfg(windows)]
             Backend::Windows => write!(f, "windows"),
+            #[cfg(windows)]
+            Backend::WindowsFakerInput => write!(f, "windows-fakerinput"),
             #[cfg(target_os = "macos")]
             Backend::MacOs => write!(f, "macos"),
             Backend::Dummy => write!(f, "dummy"),
@@ -73,6 +77,7 @@ pub struct InputEmulation {
     emulation: Box<dyn Emulation>,
     handles: HashSet<EmulationHandle>,
     pressed_keys: HashMap<EmulationHandle, HashSet<u32>>,
+    pressed_buttons: HashMap<EmulationHandle, HashSet<u32>>,
 }
 
 impl InputEmulation {
@@ -87,7 +92,9 @@ impl InputEmulation {
             #[cfg(rdp)]
             Backend::Xdp => Box::new(xdg_desktop_portal::DesktopPortalEmulation::new().await?),
             #[cfg(windows)]
-            Backend::Windows => Box::new(windows::WindowsEmulation::new()?),
+            Backend::Windows => Box::new(windows::WindowsEmulation::new(false)?),
+            #[cfg(windows)]
+            Backend::WindowsFakerInput => Box::new(windows::WindowsEmulation::new(true)?),
             #[cfg(target_os = "macos")]
             Backend::MacOs => Box::new(macos::MacOSEmulation::new()?),
             Backend::Dummy => Box::new(dummy::DummyEmulation::new()),
@@ -96,6 +103,7 @@ impl InputEmulation {
             emulation,
             handles: HashSet::new(),
             pressed_keys: HashMap::new(),
+            pressed_buttons: HashMap::new(),
         })
     }
 
@@ -141,21 +149,28 @@ impl InputEmulation {
         event: Event,
         handle: EmulationHandle,
     ) -> Result<(), EmulationError> {
-        match event {
+        let forward = match event {
             Event::Keyboard(KeyboardEvent::Key { key, state, .. }) => {
-                // prevent double pressed / released keys
-                if self.update_pressed_keys(handle, key, state) {
-                    self.emulation.consume(event, handle).await?;
-                }
-                Ok(())
+                Self::update_pressed(&mut self.pressed_keys, handle, key, state != 0)
             }
-            _ => self.emulation.consume(event, handle).await,
+            Event::Pointer(PointerEvent::Button { button, state, .. }) => {
+                if state <= 1 {
+                    Self::update_pressed(&mut self.pressed_buttons, handle, button, state == 1);
+                }
+                true
+            }
+            _ => true,
+        };
+        if forward {
+            self.emulation.consume(event, handle).await?;
         }
+        Ok(())
     }
 
     pub async fn create(&mut self, handle: EmulationHandle) -> bool {
         if self.handles.insert(handle) {
             self.pressed_keys.insert(handle, HashSet::new());
+            self.pressed_buttons.insert(handle, HashSet::new());
             self.emulation.create(handle).await;
             true
         } else {
@@ -167,6 +182,7 @@ impl InputEmulation {
         let _ = self.release_keys(handle).await;
         if self.handles.remove(&handle) {
             self.pressed_keys.remove(&handle);
+            self.pressed_buttons.remove(&handle);
             self.emulation.destroy(handle).await
         }
     }
@@ -179,19 +195,28 @@ impl InputEmulation {
     }
 
     pub async fn release_keys(&mut self, handle: EmulationHandle) -> Result<(), EmulationError> {
+        let mut released = Vec::new();
         if let Some(keys) = self.pressed_keys.get_mut(&handle) {
-            let keys = keys.drain().collect::<Vec<_>>();
-            for key in keys {
-                let event = Event::Keyboard(KeyboardEvent::Key {
+            released.extend(keys.drain().map(|key| {
+                Event::Keyboard(KeyboardEvent::Key {
                     time: 0,
                     key,
                     state: 0,
-                });
-                self.emulation.consume(event, handle).await?;
-                if let Ok(key) = input_event::scancode::Linux::try_from(key) {
-                    log::warn!("releasing stuck key: {key:?}");
-                }
-            }
+                })
+            }));
+        }
+        if let Some(buttons) = self.pressed_buttons.get_mut(&handle) {
+            released.extend(buttons.drain().map(|button| {
+                Event::Pointer(PointerEvent::Button {
+                    time: 0,
+                    button,
+                    state: 0,
+                })
+            }));
+        }
+        for event in released {
+            self.emulation.consume(event, handle).await?;
+            log::warn!("releasing held input: {event}");
         }
 
         let event = Event::Keyboard(KeyboardEvent::Modifiers {
@@ -210,19 +235,21 @@ impl InputEmulation {
             .is_some_and(|p| !p.is_empty())
     }
 
-    /// update the pressed_keys for the given handle
+    /// Update held keys or buttons for a client.
     /// returns whether the event should be processed
-    fn update_pressed_keys(&mut self, handle: EmulationHandle, key: u32, state: u8) -> bool {
-        let Some(pressed_keys) = self.pressed_keys.get_mut(&handle) else {
+    fn update_pressed(
+        inputs: &mut HashMap<EmulationHandle, HashSet<u32>>,
+        handle: EmulationHandle,
+        code: u32,
+        down: bool,
+    ) -> bool {
+        let Some(pressed) = inputs.get_mut(&handle) else {
             return false;
         };
-
-        if state == 0 {
-            // currently pressed => can release
-            pressed_keys.remove(&key)
+        if down {
+            pressed.insert(code)
         } else {
-            // currently not pressed => can press
-            pressed_keys.insert(key)
+            pressed.remove(&code)
         }
     }
 }
@@ -237,4 +264,91 @@ trait Emulation: Send {
     async fn create(&mut self, handle: EmulationHandle);
     async fn destroy(&mut self, handle: EmulationHandle);
     async fn terminate(&mut self);
+}
+
+#[cfg(test)]
+mod button_release_tests {
+    use super::*;
+    use input_event::{BTN_LEFT, BTN_RIGHT, PointerEvent};
+    use std::sync::{Arc, Mutex};
+
+    struct Recorder(Arc<Mutex<Vec<Event>>>);
+
+    #[async_trait]
+    impl Emulation for Recorder {
+        async fn consume(
+            &mut self,
+            event: Event,
+            _: EmulationHandle,
+        ) -> Result<(), EmulationError> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
+        async fn create(&mut self, _: EmulationHandle) {}
+        async fn destroy(&mut self, _: EmulationHandle) {}
+        async fn terminate(&mut self) {}
+    }
+
+    fn button(button: u32, state: u32) -> Event {
+        Event::Pointer(PointerEvent::Button {
+            time: 0,
+            button,
+            state,
+        })
+    }
+
+    async fn recorder() -> (InputEmulation, Arc<Mutex<Vec<Event>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut emulation = InputEmulation::new(Some(Backend::Dummy)).await.unwrap();
+        emulation.emulation = Box::new(Recorder(events.clone()));
+        (emulation, events)
+    }
+
+    #[tokio::test]
+    async fn disconnect_releases_held_mouse_button() {
+        let (mut emulation, events) = recorder().await;
+        emulation.create(1).await;
+        emulation.consume(button(BTN_LEFT, 1), 1).await.unwrap();
+        emulation.destroy(1).await;
+        assert!(events.lock().unwrap().contains(&button(BTN_LEFT, 0)));
+    }
+
+    #[tokio::test]
+    async fn already_released_button_is_not_released_again() {
+        let (mut emulation, events) = recorder().await;
+        emulation.create(1).await;
+        emulation.consume(button(BTN_LEFT, 1), 1).await.unwrap();
+        emulation.consume(button(BTN_LEFT, 0), 1).await.unwrap();
+        emulation.destroy(1).await;
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| **e == button(BTN_LEFT, 0))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn untracked_button_release_is_forwarded() {
+        let (mut emulation, events) = recorder().await;
+        emulation.create(1).await;
+        emulation.consume(button(BTN_LEFT, 0), 1).await.unwrap();
+        assert!(events.lock().unwrap().contains(&button(BTN_LEFT, 0)));
+    }
+
+    #[tokio::test]
+    async fn termination_releases_each_clients_mouse_buttons() {
+        let (mut emulation, events) = recorder().await;
+        emulation.create(1).await;
+        emulation.create(2).await;
+        emulation.consume(button(BTN_LEFT, 1), 1).await.unwrap();
+        emulation.consume(button(BTN_RIGHT, 1), 2).await.unwrap();
+        emulation.terminate().await;
+        let events = events.lock().unwrap();
+        assert!(events.contains(&button(BTN_LEFT, 0)));
+        assert!(events.contains(&button(BTN_RIGHT, 0)));
+    }
 }

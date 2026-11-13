@@ -75,3 +75,13 @@ This ensures that
 - b) As soon as a virtual input enters another client, lan-mouse will stop receiving events,
 which ensures clients can only be controlled directly and not indirectly through other clients.
 
+
+### Mouse button release
+
+Input emulation tracks held mouse buttons per client and releases them when that client leaves, disconnects, or emulation terminates. Button-up events without a recorded button-down are still forwarded, so they can clear a held button after a reconnect.
+
+### Windows HID input
+
+With the signed FakerInput 0.1.1 driver installed, set `emulation_backend = "windows-fakerinput"` to send mouse movement, buttons, scrolling and supported keyboard keys through HID. Keyboard reports preserve left/right modifiers and up to six simultaneous ordinary keys; Windows handles key repeat. Media and volume keys use the driver's consumer report. Keys outside the driver's descriptor, including F13–F24 and dedicated Hangul/Hanja keys, retain the normal Windows input path.
+
+This mode requires the driver and fails to start if its control interface cannot be opened. Omit the setting or select `windows` to restore the default backend. Closing the backend releases its mouse buttons and keyboard keys. Stop clients using FakerInput before uninstalling it through its installer.

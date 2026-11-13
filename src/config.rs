@@ -194,6 +194,10 @@ pub enum EmulationBackend {
     #[cfg(windows)]
     #[serde(rename = "windows")]
     Windows,
+    #[cfg(windows)]
+    #[serde(rename = "windows-fakerinput")]
+    #[value(name = "windows-fakerinput")]
+    WindowsFakerInput,
     #[cfg(target_os = "macos")]
     #[serde(rename = "macos")]
     MacOs,
@@ -214,6 +218,8 @@ impl From<EmulationBackend> for input_emulation::Backend {
             EmulationBackend::X11 => Self::X11,
             #[cfg(windows)]
             EmulationBackend::Windows => Self::Windows,
+            #[cfg(windows)]
+            EmulationBackend::WindowsFakerInput => Self::WindowsFakerInput,
             #[cfg(target_os = "macos")]
             EmulationBackend::MacOs => Self::MacOs,
             EmulationBackend::Dummy => Self::Dummy,
@@ -234,6 +240,8 @@ impl Display for EmulationBackend {
             EmulationBackend::X11 => write!(f, "X11"),
             #[cfg(windows)]
             EmulationBackend::Windows => write!(f, "windows"),
+            #[cfg(windows)]
+            EmulationBackend::WindowsFakerInput => write!(f, "windows-fakerinput"),
             #[cfg(target_os = "macos")]
             EmulationBackend::MacOs => write!(f, "macos"),
             EmulationBackend::Dummy => write!(f, "dummy"),

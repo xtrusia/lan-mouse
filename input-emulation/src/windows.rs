@@ -27,22 +27,48 @@ use windows::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
 use super::{Emulation, EmulationHandle};
 
+mod hid;
+
 const DEFAULT_REPEAT_DELAY: Duration = Duration::from_millis(500);
 const DEFAULT_REPEAT_INTERVAL: Duration = Duration::from_millis(32);
 
 pub(crate) struct WindowsEmulation {
     repeat_task: Option<AbortHandle>,
+    hid_input: Option<hid::HidInput>,
 }
 
 impl WindowsEmulation {
-    pub(crate) fn new() -> Result<Self, WindowsEmulationCreationError> {
-        Ok(Self { repeat_task: None })
+    pub(crate) fn new(fakerinput: bool) -> Result<Self, WindowsEmulationCreationError> {
+        let hid_input = if fakerinput {
+            let input = hid::HidInput::open()?;
+            log::info!("FakerInput HID mouse and keyboard active (VID FE0F, PID 00FF)");
+            Some(input)
+        } else {
+            None
+        };
+        Ok(Self {
+            repeat_task: None,
+            hid_input,
+        })
     }
 }
 
 #[async_trait]
 impl Emulation for WindowsEmulation {
     async fn consume(&mut self, event: Event, _: EmulationHandle) -> Result<(), EmulationError> {
+        if let Some(input) = &mut self.hid_input {
+            match event {
+                Event::Pointer(pointer) => {
+                    input.consume_pointer(pointer)?;
+                    return Ok(());
+                }
+                Event::Keyboard(keyboard) if input.consume_keyboard(keyboard)? => {
+                    self.kill_repeat_task();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         match event {
             Event::Pointer(pointer_event) => match pointer_event {
                 PointerEvent::Motion { time: _, dx, dy } => {
@@ -85,7 +111,14 @@ impl Emulation for WindowsEmulation {
 
     async fn destroy(&mut self, _handle: EmulationHandle) {}
 
-    async fn terminate(&mut self) {}
+    async fn terminate(&mut self) {
+        self.kill_repeat_task();
+        if let Some(input) = &mut self.hid_input {
+            if let Err(error) = input.release_all() {
+                log::warn!("FakerInput release on termination: {error}");
+            }
+        }
+    }
 }
 
 impl WindowsEmulation {

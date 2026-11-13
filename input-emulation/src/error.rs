@@ -154,4 +154,7 @@ pub enum MacOSEmulationCreationError {
 
 #[cfg(windows)]
 #[derive(Debug, Error)]
-pub enum WindowsEmulationCreationError {}
+pub enum WindowsEmulationCreationError {
+    #[error("FakerInput HID: {0}")]
+    FakerInput(#[from] io::Error),
+}
