@@ -203,21 +203,44 @@ fn mouse_button(button: u32, state: u32) {
     send_mouse_input(mi);
 }
 
-fn scroll(axis: u8, value: i32) {
-    let event_type = match axis {
-        0 => MOUSEEVENTF_WHEEL,
-        1 => MOUSEEVENTF_HWHEEL,
-        _ => return,
+fn scroll_input(axis: u8, value: i32) -> Option<MOUSEINPUT> {
+    let (event_type, delta) = match axis {
+        0 => (MOUSEEVENTF_WHEEL, value.wrapping_neg()),
+        1 => (MOUSEEVENTF_HWHEEL, value),
+        _ => return None,
     };
-    let mi = MOUSEINPUT {
+    Some(MOUSEINPUT {
         dx: 0,
         dy: 0,
-        mouseData: -value as u32,
+        mouseData: delta as u32,
         dwFlags: event_type,
         time: 0,
         dwExtraInfo: 0,
-    };
-    send_mouse_input(mi);
+    })
+}
+
+fn scroll(axis: u8, value: i32) {
+    if let Some(input) = scroll_input(axis, value) {
+        send_mouse_input(input);
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn scroll_axes_match_windows_direction_conventions() {
+        for value in [-120, 120] {
+            let vertical = scroll_input(0, value).unwrap();
+            assert_eq!(vertical.dwFlags, MOUSEEVENTF_WHEEL);
+            assert_eq!(vertical.mouseData as i32, -value);
+            let horizontal = scroll_input(1, value).unwrap();
+            assert_eq!(horizontal.dwFlags, MOUSEEVENTF_HWHEEL);
+            assert_eq!(horizontal.mouseData as i32, value);
+        }
+        assert!(scroll_input(2, 120).is_none());
+    }
 }
 
 fn key_event(key: u32, state: u8) {
