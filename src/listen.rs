@@ -273,3 +273,35 @@ async fn read_loop(
     conns.remove(index);
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use tokio::net::UdpSocket;
+    use tokio::time::{sleep, timeout};
+    use webrtc_util::conn::conn_udp_listener;
+
+    #[tokio::test]
+    async fn udp_listener_accepts_after_peer_port_closes() {
+        let listener = conn_udp_listener::listen("127.0.0.1:0").await.unwrap();
+        let addr = listener.addr().await.unwrap();
+        for _ in 0..3 {
+            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            peer.send_to(b"hello", addr).await.unwrap();
+            let (conn, _) = timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("listener must survive an earlier peer reset")
+                .unwrap();
+            let mut buf = [0u8; 8];
+            timeout(Duration::from_secs(2), conn.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            drop(peer);
+            // A reply to the closed port produces ICMP Port Unreachable / WSAECONNRESET.
+            conn.send(b"reply").await.unwrap();
+            sleep(Duration::from_millis(250)).await;
+        }
+        listener.close().await.unwrap();
+    }
+}
